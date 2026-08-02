@@ -252,6 +252,7 @@ if market_df.empty:
 st.caption(f"株価データ基準日：{used_date_str}（全{len(market_df):,}銘柄）")
 
 # --- ステップ1：全銘柄の絞り込み ---
+st.divider()
 st.subheader("ステップ1：絞り込み")
 col1, col2, col3 = st.columns(3)
 with col1:
@@ -280,6 +281,7 @@ st.dataframe(
 )
 
 # --- ステップ2：選んだ銘柄だけ財務データを取得 ---
+st.divider()
 st.subheader("ステップ2：詳しく見る銘柄を選ぶ（最大15銘柄）")
 st.caption(
     "総合スコアは、割安度（PER・PBR）、配当利回り、純利益成長率、自己資本比率、営業CFを"
@@ -340,6 +342,7 @@ if st.button("選択した銘柄の総合スコアを取得"):
         st.dataframe(detail_df, use_container_width=True, hide_index=True)
 
 # --- お気に入り（GitHubリポジトリに保存、アプリを更新しても消えない） ---
+st.divider()
 st.subheader("★ お気に入り")
 
 if not _github_token():
@@ -412,6 +415,7 @@ else:
                     st.error(f"追加に失敗しました：{e}")
 
 # --- ステップ3：個別銘柄の業績推移・財務健全性 ---
+st.divider()
 st.subheader("ステップ3：個別銘柄の業績推移・財務健全性を見る")
 st.caption(
     "開示されている全期間分の業績・負債・キャッシュフローを表示します"
@@ -545,6 +549,7 @@ if st.button("業績・財務データを取得", key="fetch_history_button"):
             st.plotly_chart(fig3, use_container_width=True)
 
 # --- ステップ4：複数銘柄の比較 ---
+st.divider()
 st.subheader("ステップ4：複数銘柄を比較する")
 st.caption("2〜5銘柄を選んで、PER・PBR・配当利回りや業績・財務健全性をまとめて比較できます。")
 
