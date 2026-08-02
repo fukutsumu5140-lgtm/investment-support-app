@@ -1,0 +1,4 @@
+streamlit
+pandas
+jquants-api-client
+python-dateutil
