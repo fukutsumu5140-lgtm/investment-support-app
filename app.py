@@ -66,9 +66,12 @@ def fetch_market_snapshot(_api_key: str):
         on="Code5",
         how="inner",
     )
-    merged = merged.rename(
+merged = merged.rename(
         columns={"CoName": "銘柄", "S33Nm": "業種", "C": "株価", "Vo": "出来高"}
     )
+    merged["株価"] = pd.to_numeric(merged["株価"], errors="coerce")
+    merged["出来高"] = pd.to_numeric(merged["出来高"], errors="coerce")
+    merged = merged.dropna(subset=["株価"])
     merged["コード4桁"] = merged["Code5"].str[:4]
     return merged, used_date_str
  
