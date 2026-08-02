@@ -88,16 +88,18 @@ def fetch_financials(_api_key: str, rows_key: tuple):
 
         latest = fin_df.iloc[-1] if fin_df is not None and len(fin_df) > 0 else None
 
+def safe_float(v):
+            v = pd.to_numeric(v, errors="coerce")
+            return float(v) if pd.notna(v) else None
+
         eps = bps = div = None
         if latest is not None:
-            if pd.notna(latest.get("EPS")):
-                eps = float(latest.get("EPS"))
-            if pd.notna(latest.get("BPS")):
-                bps = float(latest.get("BPS"))
+            eps = safe_float(latest.get("EPS"))
+            bps = safe_float(latest.get("BPS"))
             for col in ("FDivAnn", "DivAnn"):
-                v = latest.get(col)
-                if pd.notna(v) and float(v) > 0:
-                    div = float(v)
+                v = safe_float(latest.get(col))
+                if v is not None and v > 0:
+                    div = v
                     break
 
         per = round(price / eps, 1) if price and eps and eps > 0 else None
