@@ -1,4 +1,5 @@
 import os
+import time
 from datetime import datetime, timedelta
 
 import streamlit as st
@@ -26,17 +27,26 @@ try:
     cli = jquantsapi.ClientV2(api_key=api_key)
 
     # 無料プランはデータが12週間遅延するため、直近13週間前を基準に取得する
-    target_date = datetime.now(tz=tz.gettz("Asia/Tokyo")) - timedelta(weeks=13)
-    target_date_str = target_date.strftime("%Y-%m-%d")
+    base_date = datetime.now(tz=tz.gettz("Asia/Tokyo")) - timedelta(weeks=13)
 
+    df = None
+    used_date_str = None
     with st.spinner("J-Quants APIからデータを取得中..."):
-        df = cli.get_eq_bars_daily(code=TARGET_CODE, date_yyyymmdd=target_date_str)
+        # 土日・祝日でデータが無い場合に備え、最大7日さかのぼって探す
+        for i in range(7):
+            check_date_str = (base_date - timedelta(days=i)).strftime("%Y-%m-%d")
+            result = cli.get_eq_bars_daily(code=TARGET_CODE, date_yyyymmdd=check_date_str)
+            if result is not None and len(result) > 0:
+                df = result
+                used_date_str = check_date_str
+                break
+            time.sleep(1)
 
-    if df is None or len(df) == 0:
-        st.warning(f"{target_date_str} のデータが見つかりませんでした（休日等の可能性があります）。")
+    if df is None:
+        st.warning("直近7日間で取引データが見つかりませんでした。")
     else:
         st.success("接続に成功しました。")
-        st.subheader(f"{TARGET_NAME}（{TARGET_CODE}） {target_date_str} のデータ")
+        st.subheader(f"{TARGET_NAME}（{TARGET_CODE}） {used_date_str} のデータ")
         st.dataframe(df, use_container_width=True)
 
 except Exception as e:
