@@ -1,12 +1,20 @@
+import base64
+import json
 import os
 import time
 from datetime import datetime, timedelta
 
 import pandas as pd
 import plotly.express as px
+import requests
 import streamlit as st
 from dateutil import tz
 import jquantsapi
+
+# お気に入りの保存先（このリポジトリの favorites.json に保存する）
+GITHUB_OWNER = "fukutsumu5140-lgtm"
+GITHUB_REPO = "investment-support-app"
+FAVORITES_PATH = "favorites.json"
 
 st.set_page_config(page_title="投資サポートアプリ - 銘柄スクリーニング", layout="wide")
 st.title("銘柄スクリーニング")
@@ -123,6 +131,44 @@ def fetch_financials(_api_key: str, rows_key: tuple):
 
 def pct_rank(series: pd.Series, ascending: bool) -> pd.Series:
     return series.rank(pct=True, ascending=ascending, na_option="keep").fillna(0.5)
+
+
+def _github_token() -> str:
+    return st.secrets.get("GITHUB_TOKEN", os.environ.get("GITHUB_TOKEN", ""))
+
+
+def _github_headers() -> dict:
+    return {
+        "Authorization": f"token {_github_token()}",
+        "Accept": "application/vnd.github+json",
+    }
+
+
+def load_favorites_from_github():
+    """favorites.json をGitHubリポジトリから読み込む。無ければ空リストを返す。"""
+    url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{FAVORITES_PATH}"
+    resp = requests.get(url, headers=_github_headers())
+    if resp.status_code == 404:
+        return [], None
+    resp.raise_for_status()
+    data = resp.json()
+    content = base64.b64decode(data["content"]).decode("utf-8")
+    return json.loads(content), data["sha"]
+
+
+def save_favorites_to_github(favorites_list: list, sha):
+    """favorites.json をGitHubリポジトリに書き込む（新規作成 or 更新）。"""
+    url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{FAVORITES_PATH}"
+    content_str = json.dumps(favorites_list, ensure_ascii=False, indent=2)
+    payload = {
+        "message": "お気に入りを更新",
+        "content": base64.b64encode(content_str.encode("utf-8")).decode("utf-8"),
+    }
+    if sha:
+        payload["sha"] = sha
+    resp = requests.put(url, headers=_github_headers(), json=payload)
+    resp.raise_for_status()
+    return resp.json()["content"]["sha"]
 
 
 def extract_health_metrics(hist_df: pd.DataFrame) -> dict:
@@ -292,6 +338,78 @@ if st.button("選択した銘柄の総合スコアを取得"):
 
         st.caption("内訳：PER25%、PBR15%、配当利回り15%、純利益成長率20%、自己資本比率15%、営業CF10%")
         st.dataframe(detail_df, use_container_width=True, hide_index=True)
+
+# --- お気に入り（GitHubリポジトリに保存、アプリを更新しても消えない） ---
+st.subheader("★ お気に入り")
+
+if not _github_token():
+    st.info(
+        "お気に入り機能を使うには、Streamlit Cloudの「Settings > Secrets」に "
+        "GITHUB_TOKEN を追加してください。"
+    )
+else:
+    if "favorites" not in st.session_state:
+        try:
+            favs, sha = load_favorites_from_github()
+        except Exception as e:
+            st.warning(f"お気に入りの読み込みに失敗しました：{e}")
+            favs, sha = [], None
+        st.session_state["favorites"] = favs
+        st.session_state["favorites_sha"] = sha
+
+    if st.session_state["favorites"]:
+        fav_df = pd.DataFrame(st.session_state["favorites"])
+        st.dataframe(fav_df, use_container_width=True, hide_index=True)
+
+        fav_labels = [f"{f['code']} - {f['name']}" for f in st.session_state["favorites"]]
+        to_remove = st.multiselect("削除する銘柄を選んでください", fav_labels, key="fav_remove_select")
+        if st.button("選択した銘柄をお気に入りから削除"):
+            remove_codes = [s.split(" - ")[0] for s in to_remove]
+            new_favs = [f for f in st.session_state["favorites"] if f["code"] not in remove_codes]
+            try:
+                new_sha = save_favorites_to_github(new_favs, st.session_state["favorites_sha"])
+                st.session_state["favorites"] = new_favs
+                st.session_state["favorites_sha"] = new_sha
+                st.success("削除しました。")
+                st.rerun()
+            except Exception as e:
+                st.error(f"削除に失敗しました：{e}")
+    else:
+        st.caption("まだお気に入りはありません。")
+
+    st.markdown("##### お気に入りに追加")
+    add_labels = st.multiselect("追加する銘柄を選んでください（ステップ1の絞り込み結果から選べます）", option_labels, key="fav_add_select")
+    if st.button("お気に入りに追加する"):
+        if not add_labels:
+            st.warning("銘柄を選んでください。")
+        else:
+            existing_codes = {f["code"] for f in st.session_state["favorites"]}
+            new_entries = []
+            for label in add_labels:
+                code = label.split(" - ")[0]
+                if code in existing_codes:
+                    continue
+                row = top_candidates.loc[top_candidates["コード4桁"] == code].iloc[0]
+                new_entries.append(
+                    {
+                        "code": code,
+                        "name": row["銘柄"],
+                        "sector": row["業種"],
+                        "added_at": datetime.now(tz=tz.gettz("Asia/Tokyo")).strftime("%Y-%m-%d"),
+                    }
+                )
+            if not new_entries:
+                st.info("選んだ銘柄はすでにお気に入りに登録されています。")
+            else:
+                updated = st.session_state["favorites"] + new_entries
+                try:
+                    new_sha = save_favorites_to_github(updated, st.session_state["favorites_sha"])
+                    st.session_state["favorites"] = updated
+                    st.session_state["favorites_sha"] = new_sha
+                    st.success(f"{len(new_entries)}銘柄を追加しました。")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"追加に失敗しました：{e}")
 
 # --- ステップ3：個別銘柄の業績推移・財務健全性 ---
 st.subheader("ステップ3：個別銘柄の業績推移・財務健全性を見る")
