@@ -3,6 +3,7 @@ import time
 from datetime import datetime, timedelta
 
 import pandas as pd
+import plotly.express as px
 import streamlit as st
 from dateutil import tz
 import jquantsapi
@@ -247,9 +248,49 @@ if st.button("選択した銘柄のPER・PBR・配当利回りを取得"):
 
 # --- ステップ3：個別銘柄の業績推移・財務健全性 ---
 st.subheader("ステップ3：個別銘柄の業績推移・財務健全性を見る")
-st.caption("開示されている全期間分の業績・負債・キャッシュフローを表示します（無料プランのため、負債は「総資産−純資産」で概算しています）。")
+st.caption(
+    "開示されている全期間分の業績・負債・キャッシュフローを表示します"
+    "（無料プランのため、負債は「総資産−純資産」で概算しています）。"
+    "表の色は前期からの増減を示します（増加＝赤、減少＝青）。"
+)
 
 code_input = st.text_input("銘柄コードを入力してください（例：7203）", value="")
+
+# 金額が大きい項目は億円単位に変換して表示する
+OKU_COLS = [
+    "売上高", "営業利益", "経常利益", "純利益",
+    "総資産", "純資産", "推定負債（総資産−純資産）",
+    "営業CF", "投資CF", "財務CF", "現金同等物",
+]
+
+
+def to_oku(df: pd.DataFrame) -> pd.DataFrame:
+    out = df.copy()
+    for col in OKU_COLS:
+        if col in out.columns:
+            out[col] = out[col] / 1e8
+    return out
+
+
+def style_by_change(df: pd.DataFrame, cols: list):
+    """前期からの増減で文字色を変える（増加＝赤、減少＝青）。"""
+
+    def apply_style(data: pd.DataFrame) -> pd.DataFrame:
+        styles = pd.DataFrame("", index=data.index, columns=data.columns)
+        for col in cols:
+            if col not in data.columns:
+                continue
+            diff = data[col].diff()
+            styles[col] = diff.apply(
+                lambda v: "color:#d6336c; font-weight:600;"
+                if pd.notna(v) and v > 0
+                else ("color:#1c7ed6; font-weight:600;" if pd.notna(v) and v < 0 else "")
+            )
+        return styles
+
+    fmt = {c: "{:,.1f}" for c in cols if c in df.columns}
+    return df.style.hide(axis="index").apply(apply_style, axis=None).format(fmt, na_rep="―")
+
 
 if st.button("業績・財務データを取得", key="fetch_history_button"):
     if not code_input.strip():
@@ -265,17 +306,75 @@ if st.button("業績・財務データを取得", key="fetch_history_button"):
         if history_df.empty:
             st.warning("データが見つかりませんでした。銘柄コードをご確認ください。")
         else:
-            st.markdown("##### 業績推移")
+            oku_df = to_oku(history_df)
+
+            # --- 最新期のサマリーカード ---
+            latest = oku_df.iloc[-1]
+            prev = oku_df.iloc[-2] if len(oku_df) > 1 else None
+
+            def delta(col: str):
+                if prev is None or pd.isna(latest[col]) or pd.isna(prev[col]):
+                    return None
+                return latest[col] - prev[col]
+
+            st.markdown("##### 最新期のサマリー")
+            c1, c2, c3, c4 = st.columns(4)
+            c1.metric(
+                "売上高（億円）", f"{latest['売上高']:,.1f}",
+                delta=(f"{delta('売上高'):,.1f}" if delta("売上高") is not None else None),
+                delta_color="inverse",
+            )
+            c2.metric(
+                "営業利益（億円）", f"{latest['営業利益']:,.1f}",
+                delta=(f"{delta('営業利益'):,.1f}" if delta("営業利益") is not None else None),
+                delta_color="inverse",
+            )
+            c3.metric(
+                "純利益（億円）", f"{latest['純利益']:,.1f}",
+                delta=(f"{delta('純利益'):,.1f}" if delta("純利益") is not None else None),
+                delta_color="inverse",
+            )
+            c4.metric(
+                "自己資本比率（%）", f"{latest['自己資本比率(%)']:,.1f}",
+                delta=(f"{delta('自己資本比率(%)'):,.1f}" if delta("自己資本比率(%)") is not None else None),
+                delta_color="inverse",
+            )
+
+            # --- 業績推移 ---
+            st.markdown("##### 業績推移（億円、EPSは円）")
             perf_cols = ["会計期間", "売上高", "営業利益", "経常利益", "純利益", "EPS"]
-            st.dataframe(history_df[perf_cols], use_container_width=True, hide_index=True)
-            st.line_chart(history_df.set_index("会計期間")[["売上高", "営業利益", "純利益"]])
+            st.dataframe(style_by_change(oku_df[perf_cols], perf_cols[1:]), use_container_width=True)
 
-            st.markdown("##### 財務健全性（負債関連）")
+            fig1 = px.line(
+                oku_df, x="会計期間", y=["売上高", "営業利益", "純利益"],
+                markers=True, labels={"value": "億円", "variable": "指標"},
+            )
+            st.plotly_chart(fig1, use_container_width=True)
+
+            # --- 財務健全性 ---
+            st.markdown("##### 財務健全性（負債関連、億円）")
             debt_cols = ["会計期間", "総資産", "純資産", "自己資本比率(%)", "推定負債（総資産−純資産）"]
-            st.dataframe(history_df[debt_cols], use_container_width=True, hide_index=True)
-            st.line_chart(history_df.set_index("会計期間")[["総資産", "純資産", "推定負債（総資産−純資産）"]])
+            st.dataframe(style_by_change(oku_df[debt_cols], debt_cols[1:]), use_container_width=True)
 
-            st.markdown("##### キャッシュフロー")
+            fig2 = px.line(
+                oku_df, x="会計期間", y=["総資産", "純資産", "推定負債（総資産−純資産）"],
+                markers=True, labels={"value": "億円", "variable": "指標"},
+            )
+            st.plotly_chart(fig2, use_container_width=True)
+
+            # --- キャッシュフロー ---
+            st.markdown("##### キャッシュフロー（億円）")
             cf_cols = ["会計期間", "営業CF", "投資CF", "財務CF", "現金同等物"]
-            st.dataframe(history_df[cf_cols], use_container_width=True, hide_index=True)
-            st.bar_chart(history_df.set_index("会計期間")[["営業CF", "投資CF", "財務CF"]])
+            st.dataframe(style_by_change(oku_df[cf_cols], cf_cols[1:]), use_container_width=True)
+
+            cf_long = oku_df.melt(
+                id_vars="会計期間", value_vars=["営業CF", "投資CF", "財務CF"],
+                var_name="種類", value_name="金額",
+            )
+            cf_long["符号"] = cf_long["金額"].apply(lambda v: "プラス" if v >= 0 else "マイナス")
+            fig3 = px.bar(
+                cf_long, x="会計期間", y="金額", color="符号", barmode="group", facet_col="種類",
+                color_discrete_map={"プラス": "#d6336c", "マイナス": "#1c7ed6"},
+                labels={"金額": "億円"},
+            )
+            st.plotly_chart(fig3, use_container_width=True)
