@@ -11,16 +11,17 @@ import streamlit as st
 from dateutil import tz
 import jquantsapi
 
-# お気に入りの保存先（このリポジトリの favorites.json に保存する）
+# お気に入り・保有銘柄の保存先（このリポジトリの中に保存する）
 GITHUB_OWNER = "fukutsumu5140-lgtm"
 GITHUB_REPO = "investment-support-app"
 FAVORITES_PATH = "favorites.json"
+HOLDINGS_PATH = "holdings.json"
 
 st.set_page_config(page_title="投資サポートアプリ - 銘柄スクリーニング", layout="wide")
 st.title("銘柄スクリーニング")
 st.caption(
     "ステップ1：全銘柄を業種・株価・出来高で絞り込み → "
-    "ステップ2：選んだ銘柄だけPER・PBR・配当利回りを取得します。"
+    "ステップ2：選んだ銘柄だけ総合スコアを取得します。"
 )
 
 # APIキーの取得（Streamlit CloudのSecrets優先、なければ環境変数）
@@ -133,44 +134,6 @@ def pct_rank(series: pd.Series, ascending: bool) -> pd.Series:
     return series.rank(pct=True, ascending=ascending, na_option="keep").fillna(0.5)
 
 
-def _github_token() -> str:
-    return st.secrets.get("GITHUB_TOKEN", os.environ.get("GITHUB_TOKEN", ""))
-
-
-def _github_headers() -> dict:
-    return {
-        "Authorization": f"token {_github_token()}",
-        "Accept": "application/vnd.github+json",
-    }
-
-
-def load_favorites_from_github():
-    """favorites.json をGitHubリポジトリから読み込む。無ければ空リストを返す。"""
-    url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{FAVORITES_PATH}"
-    resp = requests.get(url, headers=_github_headers())
-    if resp.status_code == 404:
-        return [], None
-    resp.raise_for_status()
-    data = resp.json()
-    content = base64.b64decode(data["content"]).decode("utf-8")
-    return json.loads(content), data["sha"]
-
-
-def save_favorites_to_github(favorites_list: list, sha):
-    """favorites.json をGitHubリポジトリに書き込む（新規作成 or 更新）。"""
-    url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{FAVORITES_PATH}"
-    content_str = json.dumps(favorites_list, ensure_ascii=False, indent=2)
-    payload = {
-        "message": "お気に入りを更新",
-        "content": base64.b64encode(content_str.encode("utf-8")).decode("utf-8"),
-    }
-    if sha:
-        payload["sha"] = sha
-    resp = requests.put(url, headers=_github_headers(), json=payload)
-    resp.raise_for_status()
-    return resp.json()["content"]["sha"]
-
-
 def extract_health_metrics(hist_df: pd.DataFrame) -> dict:
     """業績推移データから、純利益成長率・自己資本比率・営業CFを取り出す（総合スコア用）。"""
     if hist_df is None or hist_df.empty:
@@ -237,6 +200,69 @@ def fetch_financial_history(_api_key: str, code: str) -> pd.DataFrame:
     return out
 
 
+@st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
+def fetch_price_trend(_api_key: str, code: str, days: int = 60) -> pd.DataFrame:
+    """指定した銘柄の直近の株価推移を取得する（1銘柄=1リクエスト）。"""
+    cli = jquantsapi.ClientV2(api_key=_api_key)
+
+    end_dt = datetime.now(tz=tz.gettz("Asia/Tokyo")) - timedelta(weeks=13)
+    start_dt = end_dt - timedelta(days=days)
+
+    df = cli.get_eq_bars_daily(
+        code=code,
+        from_yyyymmdd=start_dt.strftime("%Y-%m-%d"),
+        to_yyyymmdd=end_dt.strftime("%Y-%m-%d"),
+    )
+    time.sleep(REQUEST_INTERVAL_SEC)
+
+    if df is None or df.empty:
+        return pd.DataFrame()
+
+    df = df.copy()
+    df["Date"] = pd.to_datetime(df["Date"])
+    df["終値"] = pd.to_numeric(df["C"], errors="coerce")
+    df = df.dropna(subset=["終値"]).sort_values("Date")
+    return df[["Date", "終値"]]
+
+
+def _github_token() -> str:
+    return st.secrets.get("GITHUB_TOKEN", os.environ.get("GITHUB_TOKEN", ""))
+
+
+def _github_headers() -> dict:
+    return {
+        "Authorization": f"token {_github_token()}",
+        "Accept": "application/vnd.github+json",
+    }
+
+
+def load_json_from_github(path: str):
+    """指定したファイルをGitHubリポジトリから読み込む。無ければ空リストを返す。"""
+    url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{path}"
+    resp = requests.get(url, headers=_github_headers())
+    if resp.status_code == 404:
+        return [], None
+    resp.raise_for_status()
+    data = resp.json()
+    content = base64.b64decode(data["content"]).decode("utf-8")
+    return json.loads(content), data["sha"]
+
+
+def save_json_to_github(path: str, data_list: list, sha, message: str):
+    """指定したファイルをGitHubリポジトリに書き込む（新規作成 or 更新）。"""
+    url = f"https://api.github.com/repos/{GITHUB_OWNER}/{GITHUB_REPO}/contents/{path}"
+    content_str = json.dumps(data_list, ensure_ascii=False, indent=2)
+    payload = {
+        "message": message,
+        "content": base64.b64encode(content_str.encode("utf-8")).decode("utf-8"),
+    }
+    if sha:
+        payload["sha"] = sha
+    resp = requests.put(url, headers=_github_headers(), json=payload)
+    resp.raise_for_status()
+    return resp.json()["content"]["sha"]
+
+
 # --- データ取得（全銘柄スナップショット） ---
 try:
     with st.spinner("全銘柄の株価・業種データを取得中です（初回は数分かかることがあります）..."):
@@ -251,7 +277,78 @@ if market_df.empty:
 
 st.caption(f"株価データ基準日：{used_date_str}（全{len(market_df):,}銘柄）")
 
-# --- ステップ1：全銘柄の絞り込み ---
+# --- 保有銘柄・お気に入りの読み込み（トレンド表示・登録の両方で使う） ---
+if _github_token():
+    if "favorites" not in st.session_state:
+        try:
+            favs, sha = load_json_from_github(FAVORITES_PATH)
+        except Exception as e:
+            st.warning(f"お気に入りの読み込みに失敗しました：{e}")
+            favs, sha = [], None
+        st.session_state["favorites"] = favs
+        st.session_state["favorites_sha"] = sha
+    if "holdings" not in st.session_state:
+        try:
+            holds, hsha = load_json_from_github(HOLDINGS_PATH)
+        except Exception as e:
+            st.warning(f"保有銘柄の読み込みに失敗しました：{e}")
+            holds, hsha = [], None
+        st.session_state["holdings"] = holds
+        st.session_state["holdings_sha"] = hsha
+else:
+    st.session_state.setdefault("favorites", [])
+    st.session_state.setdefault("holdings", [])
+
+# --- 保有銘柄・お気に入りの株価トレンド（最初に表示） ---
+st.subheader("📈 保有銘柄・お気に入りの株価トレンド")
+
+trend_targets = {}
+for h in st.session_state["holdings"]:
+    trend_targets[h["code"]] = {**h, "区分": "保有銘柄"}
+for f in st.session_state["favorites"]:
+    if f["code"] in trend_targets:
+        trend_targets[f["code"]]["区分"] = trend_targets[f["code"]]["区分"] + "・お気に入り"
+    else:
+        trend_targets[f["code"]] = {**f, "区分": "お気に入り"}
+
+if not _github_token():
+    st.caption("GITHUB_TOKENを設定すると、保有銘柄・お気に入りの登録とトレンド表示が使えます。")
+elif not trend_targets:
+    st.caption("保有銘柄・お気に入りに登録すると、ここに直近の株価推移が表示されます（下の方の登録欄から登録できます）。")
+else:
+    trend_cols = st.columns(2)
+    for i, (code, info) in enumerate(trend_targets.items()):
+        try:
+            trend_df = fetch_price_trend(api_key, code)
+        except Exception as e:
+            trend_df = pd.DataFrame()
+            st.warning(f"{info['name']}のトレンド取得に失敗しました：{e}")
+
+        with trend_cols[i % 2]:
+            st.markdown(f"**{info['name']}（{code}）** ・ {info['区分']}")
+            if trend_df.empty:
+                st.caption("株価データが見つかりませんでした。")
+            else:
+                first_price = trend_df.iloc[0]["終値"]
+                last_price = trend_df.iloc[-1]["終値"]
+                change_pct = (last_price - first_price) / first_price * 100 if first_price else None
+                line_color = "#d6336c" if (change_pct or 0) >= 0 else "#1c7ed6"
+
+                fig = px.line(trend_df, x="Date", y="終値")
+                fig.update_traces(line_color=line_color)
+                fig.update_layout(
+                    height=200,
+                    margin=dict(l=10, r=10, t=10, b=10),
+                    showlegend=False,
+                    xaxis_title=None,
+                    yaxis_title=None,
+                )
+                st.plotly_chart(fig, use_container_width=True)
+                if change_pct is not None:
+                    st.caption(f"直近終値 {last_price:,.0f}円（期間変化 {change_pct:+.1f}%）")
+                else:
+                    st.caption(f"直近終値 {last_price:,.0f}円")
+
 st.divider()
 st.subheader("ステップ1：絞り込み")
 col1, col2, col3 = st.columns(3)
@@ -280,7 +377,6 @@ st.dataframe(
     hide_index=True,
 )
 
-# --- ステップ2：選んだ銘柄だけ財務データを取得 ---
 st.divider()
 st.subheader("ステップ2：詳しく見る銘柄を選ぶ（最大15銘柄）")
 st.caption(
@@ -341,7 +437,6 @@ if st.button("選択した銘柄の総合スコアを取得"):
         st.caption("内訳：PER25%、PBR15%、配当利回り15%、純利益成長率20%、自己資本比率15%、営業CF10%")
         st.dataframe(detail_df, use_container_width=True, hide_index=True)
 
-# --- お気に入り（GitHubリポジトリに保存、アプリを更新しても消えない） ---
 st.divider()
 st.subheader("★ お気に入り")
 
@@ -351,15 +446,6 @@ if not _github_token():
         "GITHUB_TOKEN を追加してください。"
     )
 else:
-    if "favorites" not in st.session_state:
-        try:
-            favs, sha = load_favorites_from_github()
-        except Exception as e:
-            st.warning(f"お気に入りの読み込みに失敗しました：{e}")
-            favs, sha = [], None
-        st.session_state["favorites"] = favs
-        st.session_state["favorites_sha"] = sha
-
     if st.session_state["favorites"]:
         fav_df = pd.DataFrame(st.session_state["favorites"])
         st.dataframe(fav_df, use_container_width=True, hide_index=True)
@@ -370,7 +456,9 @@ else:
             remove_codes = [s.split(" - ")[0] for s in to_remove]
             new_favs = [f for f in st.session_state["favorites"] if f["code"] not in remove_codes]
             try:
-                new_sha = save_favorites_to_github(new_favs, st.session_state["favorites_sha"])
+                new_sha = save_json_to_github(
+                    FAVORITES_PATH, new_favs, st.session_state["favorites_sha"], "お気に入りを更新"
+                )
                 st.session_state["favorites"] = new_favs
                 st.session_state["favorites_sha"] = new_sha
                 st.success("削除しました。")
@@ -381,7 +469,9 @@ else:
         st.caption("まだお気に入りはありません。")
 
     st.markdown("##### お気に入りに追加")
-    add_labels = st.multiselect("追加する銘柄を選んでください（ステップ1の絞り込み結果から選べます）", option_labels, key="fav_add_select")
+    add_labels = st.multiselect(
+        "追加する銘柄を選んでください（ステップ1の絞り込み結果から選べます）", option_labels, key="fav_add_select"
+    )
     if st.button("お気に入りに追加する"):
         if not add_labels:
             st.warning("銘柄を選んでください。")
@@ -406,7 +496,9 @@ else:
             else:
                 updated = st.session_state["favorites"] + new_entries
                 try:
-                    new_sha = save_favorites_to_github(updated, st.session_state["favorites_sha"])
+                    new_sha = save_json_to_github(
+                        FAVORITES_PATH, updated, st.session_state["favorites_sha"], "お気に入りを更新"
+                    )
                     st.session_state["favorites"] = updated
                     st.session_state["favorites_sha"] = new_sha
                     st.success(f"{len(new_entries)}銘柄を追加しました。")
@@ -414,7 +506,75 @@ else:
                 except Exception as e:
                     st.error(f"追加に失敗しました：{e}")
 
-# --- ステップ3：個別銘柄の業績推移・財務健全性 ---
+st.divider()
+st.subheader("📌 保有銘柄")
+
+if not _github_token():
+    st.info(
+        "保有銘柄機能を使うには、Streamlit Cloudの「Settings > Secrets」に "
+        "GITHUB_TOKEN を追加してください。"
+    )
+else:
+    if st.session_state["holdings"]:
+        hold_df = pd.DataFrame(st.session_state["holdings"])
+        st.dataframe(hold_df, use_container_width=True, hide_index=True)
+
+        hold_labels = [f"{h['code']} - {h['name']}" for h in st.session_state["holdings"]]
+        to_remove_h = st.multiselect("削除する銘柄を選んでください", hold_labels, key="hold_remove_select")
+        if st.button("選択した銘柄を保有銘柄から削除"):
+            remove_codes = [s.split(" - ")[0] for s in to_remove_h]
+            new_holds = [h for h in st.session_state["holdings"] if h["code"] not in remove_codes]
+            try:
+                new_sha = save_json_to_github(
+                    HOLDINGS_PATH, new_holds, st.session_state["holdings_sha"], "保有銘柄を更新"
+                )
+                st.session_state["holdings"] = new_holds
+                st.session_state["holdings_sha"] = new_sha
+                st.success("削除しました。")
+                st.rerun()
+            except Exception as e:
+                st.error(f"削除に失敗しました：{e}")
+    else:
+        st.caption("まだ保有銘柄はありません。")
+
+    st.markdown("##### 保有銘柄に追加")
+    add_labels_h = st.multiselect(
+        "追加する銘柄を選んでください（ステップ1の絞り込み結果から選べます）", option_labels, key="hold_add_select"
+    )
+    if st.button("保有銘柄に追加する"):
+        if not add_labels_h:
+            st.warning("銘柄を選んでください。")
+        else:
+            existing_codes_h = {h["code"] for h in st.session_state["holdings"]}
+            new_entries_h = []
+            for label in add_labels_h:
+                code = label.split(" - ")[0]
+                if code in existing_codes_h:
+                    continue
+                row = top_candidates.loc[top_candidates["コード4桁"] == code].iloc[0]
+                new_entries_h.append(
+                    {
+                        "code": code,
+                        "name": row["銘柄"],
+                        "sector": row["業種"],
+                        "added_at": datetime.now(tz=tz.gettz("Asia/Tokyo")).strftime("%Y-%m-%d"),
+                    }
+                )
+            if not new_entries_h:
+                st.info("選んだ銘柄はすでに保有銘柄に登録されています。")
+            else:
+                updated_h = st.session_state["holdings"] + new_entries_h
+                try:
+                    new_sha = save_json_to_github(
+                        HOLDINGS_PATH, updated_h, st.session_state["holdings_sha"], "保有銘柄を更新"
+                    )
+                    st.session_state["holdings"] = updated_h
+                    st.session_state["holdings_sha"] = new_sha
+                    st.success(f"{len(new_entries_h)}銘柄を追加しました。")
+                    st.rerun()
+                except Exception as e:
+                    st.error(f"追加に失敗しました：{e}")
+
 st.divider()
 st.subheader("ステップ3：個別銘柄の業績推移・財務健全性を見る")
 st.caption(
@@ -548,7 +708,6 @@ if st.button("業績・財務データを取得", key="fetch_history_button"):
             )
             st.plotly_chart(fig3, use_container_width=True)
 
-# --- ステップ4：複数銘柄の比較 ---
 st.divider()
 st.subheader("ステップ4：複数銘柄を比較する")
 st.caption("2〜5銘柄を選んで、PER・PBR・配当利回りや業績・財務健全性をまとめて比較できます。")
