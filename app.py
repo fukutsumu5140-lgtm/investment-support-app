@@ -125,6 +125,33 @@ def pct_rank(series: pd.Series, ascending: bool) -> pd.Series:
     return series.rank(pct=True, ascending=ascending, na_option="keep").fillna(0.5)
 
 
+def extract_health_metrics(hist_df: pd.DataFrame) -> dict:
+    """業績推移データから、純利益成長率・自己資本比率・営業CFを取り出す（総合スコア用）。"""
+    if hist_df is None or hist_df.empty:
+        return {"純利益成長率(%)": None, "自己資本比率(%)": None, "営業CF": None}
+
+    latest = hist_df.iloc[-1]
+    prev = hist_df.iloc[-2] if len(hist_df) > 1 else None
+
+    growth = None
+    if (
+        prev is not None
+        and pd.notna(latest.get("純利益"))
+        and pd.notna(prev.get("純利益"))
+        and prev.get("純利益") != 0
+    ):
+        growth = (latest["純利益"] - prev["純利益"]) / abs(prev["純利益"]) * 100
+
+    eqar = latest.get("自己資本比率(%)")
+    cfo = latest.get("営業CF")
+
+    return {
+        "純利益成長率(%)": round(growth, 1) if growth is not None else None,
+        "自己資本比率(%)": round(float(eqar), 1) if pd.notna(eqar) else None,
+        "営業CF": round(float(cfo), 0) if pd.notna(cfo) else None,
+    }
+
+
 @st.cache_data(ttl=60 * 60 * 24, show_spinner=False)
 def fetch_financial_history(_api_key: str, code: str) -> pd.DataFrame:
     """指定した銘柄の、開示されている全期間分の業績・財務データを取得する（1銘柄=1リクエスト）。"""
@@ -208,13 +235,17 @@ st.dataframe(
 
 # --- ステップ2：選んだ銘柄だけ財務データを取得 ---
 st.subheader("ステップ2：詳しく見る銘柄を選ぶ（最大15銘柄）")
+st.caption(
+    "総合スコアは、割安度（PER・PBR）、配当利回り、純利益成長率、自己資本比率、営業CFを"
+    "組み合わせた機械的な順位付けです。多く選ぶほど取得に時間がかかります（1銘柄あたり数十秒）。"
+)
 top_candidates = filtered.head(200)
 option_labels = top_candidates.apply(lambda r: f"{r['コード4桁']} - {r['銘柄']}", axis=1).tolist()
 selected = st.multiselect(
-    "PER・PBR・配当利回りを取得する銘柄を選んでください", option_labels, max_selections=15
+    "総合スコアを見る銘柄を選んでください", option_labels, max_selections=15
 )
 
-if st.button("選択した銘柄のPER・PBR・配当利回りを取得"):
+if st.button("選択した銘柄の総合スコアを取得"):
     if not selected:
         st.warning("銘柄を1つ以上選んでください。")
     else:
@@ -230,22 +261,36 @@ if st.button("選択した銘柄のPER・PBR・配当利回りを取得"):
         )
 
         try:
-            with st.spinner(f"{len(selected_codes)}銘柄の財務データを取得中です..."):
+            with st.spinner(f"{len(selected_codes)}銘柄のバリュエーション・財務健全性を取得中です..."):
                 detail_df = fetch_financials(api_key, rows_key)
+
+                health_rows = []
+                for code in selected_codes:
+                    hist = fetch_financial_history(api_key, code)
+                    metrics = extract_health_metrics(hist)
+                    metrics["コード"] = code
+                    health_rows.append(metrics)
+                health_df = pd.DataFrame(health_rows)
         except Exception as e:
             st.error(f"財務データの取得に失敗しました：{e}")
             st.stop()
 
-        detail_df["スコア"] = (
+        detail_df = detail_df.merge(health_df, on="コード", how="left")
+
+        detail_df["総合スコア"] = (
             (
-                pct_rank(detail_df["PER"], False) * 0.4
-                + pct_rank(detail_df["PBR"], False) * 0.3
-                + pct_rank(detail_df["配当利回り(%)"], True) * 0.3
+                pct_rank(detail_df["PER"], False) * 0.25
+                + pct_rank(detail_df["PBR"], False) * 0.15
+                + pct_rank(detail_df["配当利回り(%)"], True) * 0.15
+                + pct_rank(detail_df["純利益成長率(%)"], True) * 0.20
+                + pct_rank(detail_df["自己資本比率(%)"], True) * 0.15
+                + pct_rank(detail_df["営業CF"], True) * 0.10
             )
             * 100
         ).round(0)
-        detail_df = detail_df.sort_values("スコア", ascending=False)
+        detail_df = detail_df.sort_values("総合スコア", ascending=False)
 
+        st.caption("内訳：PER25%、PBR15%、配当利回り15%、純利益成長率20%、自己資本比率15%、営業CF10%")
         st.dataframe(detail_df, use_container_width=True, hide_index=True)
 
 # --- ステップ3：個別銘柄の業績推移・財務健全性 ---
@@ -452,4 +497,3 @@ if st.button("比較する", key="compare_button"):
             fig = px.bar(comp_df, x="銘柄", y=metric, color="銘柄", title=metric)
             fig.update_layout(showlegend=False, height=300)
             cols[i % 2].plotly_chart(fig, use_container_width=True)
-        
