@@ -88,7 +88,7 @@ def fetch_financials(_api_key: str, rows_key: tuple):
 
         latest = fin_df.iloc[-1] if fin_df is not None and len(fin_df) > 0 else None
 
-def safe_float(v):
+        def safe_float(v):
             v = pd.to_numeric(v, errors="coerce")
             return float(v) if pd.notna(v) else None
 
@@ -452,4 +452,4 @@ if st.button("比較する", key="compare_button"):
             fig = px.bar(comp_df, x="銘柄", y=metric, color="銘柄", title=metric)
             fig.update_layout(showlegend=False, height=300)
             cols[i % 2].plotly_chart(fig, use_container_width=True)
-            
+        
