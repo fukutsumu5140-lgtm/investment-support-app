@@ -27,7 +27,7 @@ TARGET_NAME = "トヨタ自動車"
 try:
     cli = jquantsapi.ClientV2(api_key=api_key)
 
-    end_dt = datetime.now(tz=tz.gettz("Asia/Tokyo"))
+    end_dt = datetime.now(tz=tz.gettz("Asia/Tokyo")) - timedelta(weeks=13)
     start_dt = end_dt - timedelta(days=14)
 
     with st.spinner("J-Quants APIからデータを取得中..."):
