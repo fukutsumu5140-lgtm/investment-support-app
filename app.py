@@ -378,3 +378,76 @@ if st.button("業績・財務データを取得", key="fetch_history_button"):
                 labels={"金額": "億円"},
             )
             st.plotly_chart(fig3, use_container_width=True)
+
+# --- ステップ4：複数銘柄の比較 ---
+st.subheader("ステップ4：複数銘柄を比較する")
+st.caption("2〜5銘柄を選んで、PER・PBR・配当利回りや業績・財務健全性をまとめて比較できます。")
+
+compare_labels = st.multiselect(
+    "比較する銘柄を選んでください", option_labels, max_selections=5, key="compare_select"
+)
+
+if st.button("比較する", key="compare_button"):
+    if len(compare_labels) < 2:
+        st.warning("2銘柄以上を選んでください。")
+    else:
+        compare_codes = [s.split(" - ")[0] for s in compare_labels]
+        compare_rows_key = tuple(
+            (
+                code,
+                top_candidates.loc[top_candidates["コード4桁"] == code, "銘柄"].iloc[0],
+                top_candidates.loc[top_candidates["コード4桁"] == code, "業種"].iloc[0],
+                float(top_candidates.loc[top_candidates["コード4桁"] == code, "株価"].iloc[0]),
+            )
+            for code in compare_codes
+        )
+
+        try:
+            with st.spinner(f"{len(compare_codes)}銘柄の指標を取得中です（既に見た銘柄は高速です）..."):
+                per_pbr_df = fetch_financials(api_key, compare_rows_key)
+                history_frames = {code: fetch_financial_history(api_key, code) for code in compare_codes}
+        except Exception as e:
+            st.error(f"データ取得に失敗しました：{e}")
+            st.stop()
+
+        comp_rows = []
+        for code in compare_codes:
+            base = per_pbr_df[per_pbr_df["コード"] == code].iloc[0]
+            hist = history_frames.get(code, pd.DataFrame())
+            latest_h = hist.iloc[-1] if not hist.empty else None
+
+            def h_val(col, in_oku=False):
+                if latest_h is None or pd.isna(latest_h.get(col)):
+                    return None
+                v = float(latest_h.get(col))
+                return v / 1e8 if in_oku else v
+
+            comp_rows.append(
+                {
+                    "銘柄": base["銘柄"],
+                    "コード": code,
+                    "業種": base["業種"],
+                    "株価（円）": base["株価"],
+                    "PER（倍）": base["PER"],
+                    "PBR（倍）": base["PBR"],
+                    "配当利回り（%）": base["配当利回り(%)"],
+                    "売上高（億円）": h_val("売上高", in_oku=True),
+                    "純利益（億円）": h_val("純利益", in_oku=True),
+                    "自己資本比率（%）": h_val("自己資本比率(%)"),
+                    "営業CF（億円）": h_val("営業CF", in_oku=True),
+                }
+            )
+
+        comp_df = pd.DataFrame(comp_rows)
+
+        st.markdown("##### 比較表（銘柄を横に並べています）")
+        st.dataframe(comp_df.set_index("銘柄").T, use_container_width=True)
+
+        st.markdown("##### 主要指標の比較グラフ")
+        chart_metrics = ["PER（倍）", "PBR（倍）", "配当利回り（%）", "自己資本比率（%）"]
+        cols = st.columns(2)
+        for i, metric in enumerate(chart_metrics):
+            fig = px.bar(comp_df, x="銘柄", y=metric, color="銘柄", title=metric)
+            fig.update_layout(showlegend=False, height=300)
+            cols[i % 2].plotly_chart(fig, use_container_width=True)
+            
